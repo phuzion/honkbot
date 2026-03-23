@@ -2,6 +2,7 @@
 import datetime
 import pytz
 import re
+from typing import Optional
 
 # Third party libraries
 import requests
@@ -39,41 +40,53 @@ class RoleDropdown(discord.ui.Select):
         self.action = action
 
     async def callback(self, interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+
         role = discord.utils.get(interaction.guild.roles, name=self.values[0])
+        if not role:
+            return await interaction.response.send_message(f"Role '{self.values[0]}' not found.", ephemeral=True)
+
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if not member:
+            return await interaction.response.send_message("Unable to get member information.", ephemeral=True)
+
         try:
             if self.action == "join":
-                if role not in interaction.user.roles:
-                    await interaction.user.add_roles(role)
+                if role not in member.roles:
+                    await member.add_roles(role)
 
                     view = RoleView()
-                    view.children[0].placeholder = "(Optional) Add another role"
+                    if isinstance(view.children[0], RoleDropdown):
+                        view.children[0].placeholder = "(Optional) Add another role"
                     return await interaction.response.edit_message(
-                        content=f"Adding {interaction.user.display_name} to {self.values[0]}",
+                        content=f"Adding {member.display_name} to {self.values[0]}",
                         view=view,
                     )
                 return await interaction.response.edit_message(
-                    content=f"{interaction.user.display_name} is already in {self.values[0]}",
+                    content=f"{member.display_name} is already in {self.values[0]}",
                     view=RoleView(),
                 )
             elif self.action == "leave":
-                if role in interaction.user.roles:
-                    await interaction.user.remove_roles(role)
+                if role in member.roles:
+                    await member.remove_roles(role)
 
                     view = RoleView(action="leave")
-                    view.children[0].placeholder = "(Optional) Leave another role"
+                    if isinstance(view.children[0], RoleDropdown):
+                        view.children[0].placeholder = "(Optional) Leave another role"
                     return await interaction.response.edit_message(
-                        content=f"Removing {interaction.user.display_name} from {self.values[0]}",
+                        content=f"Removing {member.display_name} from {self.values[0]}",
                         view=view,
                     )
                 return await interaction.response.edit_message(
-                    content=f"{interaction.user.display_name} is not in {self.values[0]}",
+                    content=f"{member.display_name} is not in {self.values[0]}",
                     view=RoleView(action="leave"),
                 )
-        except Forbidden:
-            await self.respond_to_user(
-                ctx,
+        except discord.Forbidden:
+            return await interaction.response.send_message(
                 "I do not have permissions to assign roles right now!",
                 view=RoleView(),
+                ephemeral=True
             )
 
 
@@ -113,7 +126,10 @@ class Honkbot(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.logger.info(f"Logged in as {self.bot.user} - {self.bot.user.id}")
+        if self.bot and self.bot.user:
+            self.logger.info(f"Logged in as {self.bot.user} - {self.bot.user.id}")
+        else:
+            self.logger.info("Bot ready but user information not available")
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -177,7 +193,8 @@ class Honkbot(commands.Cog):
                 await ctx.author.add_roles(role_obj)
 
                 view = RoleView()
-                view.children[0].placeholder = "(Optional) Add another role"
+                if isinstance(view.children[0], RoleDropdown):
+                    view.children[0].placeholder = "(Optional) Add another role"
                 return await self.respond_to_user(
                     ctx, f"Adding {ctx.author.display_name} to {role}", view=view
                 )
@@ -215,7 +232,8 @@ class Honkbot(commands.Cog):
                 await ctx.author.remove_roles(role_obj)
 
                 view = RoleView(action="leave")
-                view.children[0].placeholder = "(Optional) Leave another role"
+                if isinstance(view.children[0], RoleDropdown):
+                    view.children[0].placeholder = "(Optional) Leave another role"
                 return await self.respond_to_user(
                     ctx, f"Removing {ctx.author.display_name} from {role}", view=view
                 )
@@ -362,7 +380,7 @@ class Honkbot(commands.Cog):
         await ctx.invoke(self.insult, name="ranatalus")
 
     @commands.command()
-    async def record(self, ctx, *, search: str = None):
+    async def record(self, ctx, *, search: Optional[str] = None):
         """
         Accesses speedrun.com to get world record of given game.
 
