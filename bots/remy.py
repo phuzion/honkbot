@@ -1,79 +1,231 @@
-from bs4 import BeautifulSoup
-from typing import Optional
+from typing import Optional, Dict, List
 import requests
-import re
 from discord.ext import commands
 
 REMY_URL = "https://remywiki.com"
+REMY_API = f"{REMY_URL}/api.php"
+REMY_HEADERS = {"User-Agent": "OhioDDR-honkbot"}
+
+# Overview: This code is used primarily for taking a song name and returning an image of the jacket or banner for that song from RemyWiki.
+# This now uses the MediaWiki API to query pages directly instead of scraping HTML with BeautifulSoup.
 
 
-def page_is_song(page: BeautifulSoup):
-    if page.find("a", {"title": "Category:Songs"}):
-        return True
+def page_is_song(title: str) -> bool:
+    """
+    Checks if a page belongs to the Songs category using the MediaWiki API.
+    
+    Uses the MediaWiki API to resolve song category membership.
+    
+    :param title: The title of the page to check
+    :return: True if the page is in the Songs category, False otherwise
+    """
+    params = {
+        "action": "query",
+        "format": "json",
+        "prop": "categories",
+        "titles": title,
+        "formatversion": "2"
+    }
+    try:
+        response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        data = response.json()
+        pages = data.get("query", {}).get("pages", [])
+        if pages and pages[0].get("categories"):
+            categories = pages[0]["categories"]
+            return any(cat.get("title") == "Category:Songs" for cat in categories)
+    except Exception:
+        pass
+    
     return False
 
 
-def search_song(query: str) -> Optional[BeautifulSoup]:
+def search_song(query: str) -> Optional[str]:
     """
-    Tries to find a certain song on RemyWiki
+    Tries to find a certain song on RemyWiki using the MediaWiki API.
 
     MediaWiki will tell you if a title that you've searched is found as a direct
-        article title. However, if it doesn't find one, the top page may not be
-        a song. The category search to force songs won't allow the direct
-        article title. So, we search the raw title, see if we've found it, then
-        search in songs only if we haven't. So exact titles should always match,
-        and close ones should usually match.
+    article title. However, if it doesn't find one, the top page may not be
+    a song. The category search to force songs won't allow the direct
+    article title. So, we search the raw title, see if we've found it, then
+    search in songs only if we haven't. So exact titles should always match,
+    and close ones should usually match.
 
     :param query: a string representing something that's supposed to be a
         song name to find
-    :return: a BeautifulSoup object representing a RemyWiki page for a song,
-        or None, representing a lack of results
+    :return: the title of a RemyWiki page for a song, or None, representing a lack of results
     """
-    search_data = {"search": query}
-    remy_search = requests.get(f"{REMY_URL}/index.php", params=search_data)
-    remy_data = BeautifulSoup(remy_search.text, "html.parser")
-
-    # If we were redirected to a Page and it's a Song, just return it
-    if page_is_song(remy_data):
-        return remy_data
-
-    # If we're not on a Page, check to see if the Search found an exact match
-    already_found = remy_data.find("p", {"class": "mw-search-exists"})
-    if already_found:
-        song_result = requests.get(f"{REMY_URL}{already_found.strong.a['href']}")
-        possible_song = BeautifulSoup(song_result.text, "html.parser")
-        if page_is_song(possible_song):
-            return possible_song
-
-    # Otherwise, just take the first search result when searching in category
-    search_data = {"search": f'{query} incategory:"Songs"'}
-    remy_search = requests.get(f"{REMY_URL}/index.php", params=search_data)
-    remy_data = BeautifulSoup(remy_search.text, "html.parser")
-    first_result = remy_data.find("ul", {"class": "mw-search-results"})
-    if first_result:
-        song_result = requests.get(f"{REMY_URL}{first_result.li.div.a['href']}")
-        return BeautifulSoup(song_result.text, "html.parser")
-
-
-def get_image_from_gallery(href: str, image_type: str) -> Optional[str]:
-    """
-    Gets an image from the Gallery page template on RemyWiki
-
-    :param href: The relative url (including the slash) of a gallery page
-    :param image_type: Either "banner" or "jacket"
-
-    :return: A relative URL pointing to an image OR None
-    """
-    gallery_page = requests.get(f"{REMY_URL}{href}")
-    gallery_data = BeautifulSoup(gallery_page.text, "html.parser")
-    image_sections = gallery_data.find_all("li", {"class": "gallerybox"})
-    for section in image_sections:
-        description = section.find("p").text
-        if image_type in description:
-            img_urls = section.find("img")["srcset"].split(",")
-            largest_image = img_urls[-1]
-            return largest_image.split(" ")[1]  # space,url,size
+    # First try to get the page directly
+    if page_is_song(query):
+        return query
+    
+    # Search for the query
+    # Using MediaWiki search action to find potential matches
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": query,
+        "format": "json",
+        "formatversion": "2"
+    }
+    try:
+        response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        data = response.json()
+        search_results = data.get("query", {}).get("search", [])
+        for result in search_results:
+            if page_is_song(result["title"]):
+                return result["title"]
+    except Exception:
+        pass
+    
+    # Search in Songs category only
+    # Restricting search results to only the Songs category
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": f'{query} incategory:"Songs"',
+        "format": "json",
+        "formatversion": "2"
+    }
+    try:
+        response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        data = response.json()
+        search_results = data.get("query", {}).get("search", [])
+        if search_results:
+            return search_results[0]["title"]
+    except Exception:
+        pass
+    
     return None
+
+
+def get_images_from_page(title: str) -> Dict[str, str]:
+    """
+    Gets all images from a page using the MediaWiki API.
+    
+    Uses the MediaWiki API to get images for a page.
+    
+    Fetches image URLs by querying imageinfo for each image found.
+    
+    :param title: The title of the page to get images from
+    :return: A dictionary mapping image titles to their URLs
+    """
+    params = {
+        "action": "query",
+        "format": "json",
+        "prop": "images",
+        "titles": title,
+        "formatversion": "2"
+    }
+    images = {}
+    try:
+        response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        data = response.json()
+        pages = data.get("query", {}).get("pages", [])
+        if pages and pages[0].get("images"):
+            image_list = pages[0]["images"]
+            for image in image_list:
+                image_title = image["title"]
+                # Get the image info to retrieve the URL
+                image_params = {
+                    "action": "query",
+                    "format": "json",
+                    "titles": image_title,
+                    "prop": "imageinfo",
+                    "iiprop": "url",
+                    "formatversion": "2"
+                }
+                try:
+                    image_response = requests.get(REMY_API, params=image_params, headers=REMY_HEADERS)
+                    image_data = image_response.json()
+                    image_pages = image_data.get("query", {}).get("pages", [])
+                    if image_pages and image_pages[0].get("imageinfo"):
+                        url = image_pages[0]["imageinfo"][0]["url"]
+                        images[image_title] = url
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    
+    return images
+
+
+def get_images_from_gallery(title: str) -> Dict[str, str]:
+    """
+    Gets all images from a gallery page using the MediaWiki API.
+
+    Gallery pages are separate from song pages and may include banner/jacket images
+    that are not directly attached to the song page.
+
+    :param title: The song title (or Gallery:… title)
+    :return: A dictionary mapping image titles to their URLs
+    """
+    gallery_title = title if title.startswith("Gallery:") else f"Gallery:{title}"
+    params = {
+        "action": "query",
+        "format": "json",
+        "prop": "images",
+        "titles": gallery_title,
+        "formatversion": "2"
+    }
+    images = {}
+    try:
+        response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        data = response.json()
+        pages = data.get("query", {}).get("pages", [])
+        if pages and pages[0].get("images"):
+            image_list = pages[0]["images"]
+            for image in image_list:
+                image_title = image["title"]
+                image_params = {
+                    "action": "query",
+                    "format": "json",
+                    "titles": image_title,
+                    "prop": "imageinfo",
+                    "iiprop": "url",
+                    "formatversion": "2"
+                }
+                try:
+                    image_response = requests.get(REMY_API, params=image_params, headers=REMY_HEADERS)
+                    image_data = image_response.json()
+                    image_pages = image_data.get("query", {}).get("pages", [])
+                    if image_pages and image_pages[0].get("imageinfo"):
+                        url = image_pages[0]["imageinfo"][0]["url"]
+                        images[image_title] = url
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return images
+
+
+def check_page_has_gallery(title: str) -> bool:
+    """
+    Checks if a page has the Gallery template using the MediaWiki API.
+    
+    Uses the MediaWiki API to detect gallery template usage.
+    
+    :param title: The title of the page to check
+    :return: True if the page has a Gallery template, False otherwise
+    """
+    params = {
+        "action": "query",
+        "format": "json",
+        "prop": "templates",
+        "titles": title,
+        "formatversion": "2",
+        "tllimit": "50"
+    }
+    try:
+        response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        data = response.json()
+        pages = data.get("query", {}).get("pages", [])
+        if pages and pages[0].get("templates"):
+            templates = pages[0]["templates"]
+            return any("Gallery" in t["title"] for t in templates)
+    except Exception:
+        pass
+    
+    return False
 
 
 def get_image(query: str, image_type: str = "jacket") -> str:
@@ -81,8 +233,7 @@ def get_image(query: str, image_type: str = "jacket") -> str:
     Gets an image (or a message about no image) from a RemyWiki song page.
 
     This is intended to be used for jackets or banners. This searches the
-    song page for "song name's jacket" or "song name's banner" and returns
-    the image connected to that.
+    song page for images and returns the appropriate one.
 
     :param query: a string representing something that's supposed to be a
         song name to find
@@ -90,41 +241,51 @@ def get_image(query: str, image_type: str = "jacket") -> str:
     :return: a response fitting for the bot to return, either the requested
         image or a message describing what it found instead
     """
-    song_page = search_song(query)
+    song_title = search_song(query)
     found_images = {}
-    if song_page:
-        # First try to get the image from the Gallery
-        gallery = song_page.find("a", href=re.compile(r"Gallery"))
-        if gallery:
-            first_gallery_banner = get_image_from_gallery(gallery["href"], "banner")
-            first_gallery_jacket = get_image_from_gallery(gallery["href"], "jacket")
-            if first_gallery_banner:
-                found_images["banner"] = first_gallery_banner
-            if first_gallery_jacket:
-                found_images["jacket"] = first_gallery_jacket
+    
+    if song_title:
+        # 1) Prefer images directly on the song page
+        images = get_images_from_page(song_title)
+        page_fallback = None
+        for image_title, image_url in images.items():
+            lower_title = image_title.lower()
+            if "banner" in lower_title:
+                found_images["banner"] = image_url
+            elif "jacket" in lower_title:
+                found_images["jacket"] = image_url
+            if not page_fallback:
+                page_fallback = image_url
+
+        if image_type in found_images:
+            return found_images[image_type]
+
+        if page_fallback:
+            # Page has images, so prioritise these before gallery fallback
+            return page_fallback
+
+        # 2) fallback to gallery images when there are no direct page images
+        if check_page_has_gallery(song_title):
+            gallery_images = get_images_from_gallery(song_title)
+            gallery_fallback = None
+            for image_title, image_url in gallery_images.items():
+                lower_title = image_title.lower()
+                if "banner" in lower_title:
+                    found_images["banner"] = image_url
+                elif "jacket" in lower_title:
+                    found_images["jacket"] = image_url
+                if not gallery_fallback:
+                    gallery_fallback = image_url
             if image_type in found_images:
-                return f"{REMY_URL}{found_images[image_type]}"
-        # If there is no Gallery, try to find it on the page
-        images = song_page.find_all("div", {"class": "thumbinner"})
-        for image in images:
-            if "banner" in image.find("div", {"class": "thumbcaption"}).text:
-                found_images["banner"] = f"{REMY_URL}{image.find('img')['src']}"
-            elif "jacket" in image.find("div", {"class": "thumbcaption"}).text:
-                found_images["jacket"] = f"{REMY_URL}{image.find('img')['src']}"
-            if image_type in found_images:
-                return f"{found_images[image_type]}"
-        # If we haven't found the right image in either place
-        song_title = song_page.find("h1", {"id": "firstHeading"}).text
-        # Return any other images we found
-        if any(found_images):
-            image_url = next(img for img in found_images.values() if img)
-            return f"{song_title} does not have a {image_type}, but it does have this:\n{image_url}"
-        # Or give a message that there are no related images
+                return found_images[image_type]
+            if gallery_fallback:
+                return gallery_fallback
+
+        # Otherwise report no available images
+        if song_title.lower() == query.lower():
+            return f"{song_title} does not have any images"
         else:
-            if song_title.lower() == query.lower():
-                return f"{song_title} does not have any images"
-            else:
-                return f"{query} seems to be the song {song_title} but it does not have any images"
+            return f"{query} seems to be the song {song_title} but it does not have any images"
     else:  # No song page
         return f"Could not find a song that looks like: {query}"
 
