@@ -1,6 +1,9 @@
 from typing import Optional, Dict, List
 import requests
+import time
 from discord.ext import commands
+
+DEBUG_MODE = False
 
 REMY_URL = "https://remywiki.com"
 REMY_API = f"{REMY_URL}/api.php"
@@ -10,13 +13,66 @@ REMY_HEADERS = {"User-Agent": "OhioDDR-honkbot"}
 # This now uses the MediaWiki API to query pages directly instead of scraping HTML with BeautifulSoup.
 
 
-def page_is_song(title: str) -> bool:
+class DebugTracker:
+    """Tracks HTTP requests and timing for debug output."""
+    
+    def __init__(self):
+        self.requests = []
+        self.start_time = time.time()
+    
+    def track_request(self, method: str, url: str, params: Optional[Dict] = None, 
+                     response_status: int = 0, response_size: int = 0, elapsed_ms: float = 0):
+        """
+        Record a single HTTP request with timing information.
+        
+        :param method: HTTP method (GET, POST, etc.)
+        :param url: Request URL
+        :param params: Request parameters
+        :param response_status: HTTP status code
+        :param response_size: Size of response in bytes
+        :param elapsed_ms: Time taken in milliseconds
+        """
+        self.requests.append({
+            "method": method,
+            "url": url,
+            "params": params,
+            "status": response_status,
+            "size": response_size,
+            "elapsed_ms": elapsed_ms
+        })
+    
+    def get_total_time_ms(self) -> float:
+        """Calculate total elapsed time in milliseconds."""
+        return (time.time() - self.start_time) * 1000
+    
+    def format_debug_output(self) -> str:
+        """Format all tracked requests into a readable debug message."""
+        lines = ["**DEBUG LOG**"]
+        lines.append("")
+        
+        for i, req in enumerate(self.requests, 1):
+            lines.append(f"Request {i}: {req['method']} {req['url']}")
+            if req['params']:
+                # Format params nicely
+                param_str = ", ".join(f"{k}={v}" for k, v in req['params'].items())
+                lines.append(f"  Params: {param_str}")
+            lines.append(f"  Status: {req['status']} | Response: {req['size']} bytes | Time: {req['elapsed_ms']:.2f}ms")
+            lines.append("")
+        
+        total_ms = self.get_total_time_ms()
+        lines.append(f"**Total Time: {total_ms:.2f}ms**")
+        
+        return "\n".join(lines)
+
+
+def page_is_song(title: str, tracker: Optional[DebugTracker] = None) -> bool:
     """
     Checks if a page belongs to the Songs category using the MediaWiki API.
     
     Uses the MediaWiki API to resolve song category membership.
     
     :param title: The title of the page to check
+    :param tracker: Optional DebugTracker to record request timing
     :return: True if the page is in the Songs category, False otherwise
     """
     params = {
@@ -27,7 +83,13 @@ def page_is_song(title: str) -> bool:
         "formatversion": "2"
     }
     try:
+        start_time = time.time()
         response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        elapsed_ms = (time.time() - start_time) * 1000
+        
+        if tracker:
+            tracker.track_request("GET", REMY_API, params, response.status_code, len(response.content), elapsed_ms)
+        
         data = response.json()
         pages = data.get("query", {}).get("pages", [])
         if pages and pages[0].get("categories"):
@@ -39,7 +101,7 @@ def page_is_song(title: str) -> bool:
     return False
 
 
-def search_song(query: str) -> Optional[str]:
+def search_song(query: str, tracker: Optional[DebugTracker] = None) -> Optional[str]:
     """
     Tries to find a certain song on RemyWiki using the MediaWiki API.
 
@@ -52,10 +114,11 @@ def search_song(query: str) -> Optional[str]:
 
     :param query: a string representing something that's supposed to be a
         song name to find
+    :param tracker: Optional DebugTracker to record request timing
     :return: the title of a RemyWiki page for a song, or None, representing a lack of results
     """
     # First try to get the page directly
-    if page_is_song(query):
+    if page_is_song(query, tracker):
         return query
     
     # Search for the query
@@ -68,11 +131,17 @@ def search_song(query: str) -> Optional[str]:
         "formatversion": "2"
     }
     try:
+        start_time = time.time()
         response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        elapsed_ms = (time.time() - start_time) * 1000
+        
+        if tracker:
+            tracker.track_request("GET", REMY_API, params, response.status_code, len(response.content), elapsed_ms)
+        
         data = response.json()
         search_results = data.get("query", {}).get("search", [])
         for result in search_results:
-            if page_is_song(result["title"]):
+            if page_is_song(result["title"], tracker):
                 return result["title"]
     except Exception:
         pass
@@ -87,7 +156,13 @@ def search_song(query: str) -> Optional[str]:
         "formatversion": "2"
     }
     try:
+        start_time = time.time()
         response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        elapsed_ms = (time.time() - start_time) * 1000
+        
+        if tracker:
+            tracker.track_request("GET", REMY_API, params, response.status_code, len(response.content), elapsed_ms)
+        
         data = response.json()
         search_results = data.get("query", {}).get("search", [])
         if search_results:
@@ -98,7 +173,7 @@ def search_song(query: str) -> Optional[str]:
     return None
 
 
-def get_images_from_page(title: str) -> Dict[str, str]:
+def get_images_from_page(title: str, tracker: Optional[DebugTracker] = None) -> Dict[str, str]:
     """
     Gets all images from a page using the MediaWiki API.
     
@@ -107,6 +182,7 @@ def get_images_from_page(title: str) -> Dict[str, str]:
     Fetches image URLs by querying imageinfo for each image found.
     
     :param title: The title of the page to get images from
+    :param tracker: Optional DebugTracker to record request timing
     :return: A dictionary mapping image titles to their URLs
     """
     params = {
@@ -118,7 +194,13 @@ def get_images_from_page(title: str) -> Dict[str, str]:
     }
     images = {}
     try:
+        start_time = time.time()
         response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        elapsed_ms = (time.time() - start_time) * 1000
+        
+        if tracker:
+            tracker.track_request("GET", REMY_API, params, response.status_code, len(response.content), elapsed_ms)
+        
         data = response.json()
         pages = data.get("query", {}).get("pages", [])
         if pages and pages[0].get("images"):
@@ -135,7 +217,13 @@ def get_images_from_page(title: str) -> Dict[str, str]:
                     "formatversion": "2"
                 }
                 try:
+                    start_time = time.time()
                     image_response = requests.get(REMY_API, params=image_params, headers=REMY_HEADERS)
+                    elapsed_ms = (time.time() - start_time) * 1000
+                    
+                    if tracker:
+                        tracker.track_request("GET", REMY_API, image_params, image_response.status_code, len(image_response.content), elapsed_ms)
+                    
                     image_data = image_response.json()
                     image_pages = image_data.get("query", {}).get("pages", [])
                     if image_pages and image_pages[0].get("imageinfo"):
@@ -149,7 +237,7 @@ def get_images_from_page(title: str) -> Dict[str, str]:
     return images
 
 
-def get_images_from_gallery(title: str) -> Dict[str, str]:
+def get_images_from_gallery(title: str, tracker: Optional[DebugTracker] = None) -> Dict[str, str]:
     """
     Gets all images from a gallery page using the MediaWiki API.
 
@@ -157,6 +245,7 @@ def get_images_from_gallery(title: str) -> Dict[str, str]:
     that are not directly attached to the song page.
 
     :param title: The song title (or Gallery:… title)
+    :param tracker: Optional DebugTracker to record request timing
     :return: A dictionary mapping image titles to their URLs
     """
     gallery_title = title if title.startswith("Gallery:") else f"Gallery:{title}"
@@ -169,7 +258,13 @@ def get_images_from_gallery(title: str) -> Dict[str, str]:
     }
     images = {}
     try:
+        start_time = time.time()
         response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        elapsed_ms = (time.time() - start_time) * 1000
+        
+        if tracker:
+            tracker.track_request("GET", REMY_API, params, response.status_code, len(response.content), elapsed_ms)
+        
         data = response.json()
         pages = data.get("query", {}).get("pages", [])
         if pages and pages[0].get("images"):
@@ -185,7 +280,13 @@ def get_images_from_gallery(title: str) -> Dict[str, str]:
                     "formatversion": "2"
                 }
                 try:
+                    start_time = time.time()
                     image_response = requests.get(REMY_API, params=image_params, headers=REMY_HEADERS)
+                    elapsed_ms = (time.time() - start_time) * 1000
+                    
+                    if tracker:
+                        tracker.track_request("GET", REMY_API, image_params, image_response.status_code, len(image_response.content), elapsed_ms)
+                    
                     image_data = image_response.json()
                     image_pages = image_data.get("query", {}).get("pages", [])
                     if image_pages and image_pages[0].get("imageinfo"):
@@ -198,13 +299,14 @@ def get_images_from_gallery(title: str) -> Dict[str, str]:
     return images
 
 
-def check_page_has_gallery(title: str) -> bool:
+def check_page_has_gallery(title: str, tracker: Optional[DebugTracker] = None) -> bool:
     """
     Checks if a page has the Gallery template using the MediaWiki API.
     
     Uses the MediaWiki API to detect gallery template usage.
     
     :param title: The title of the page to check
+    :param tracker: Optional DebugTracker to record request timing
     :return: True if the page has a Gallery template, False otherwise
     """
     params = {
@@ -216,7 +318,13 @@ def check_page_has_gallery(title: str) -> bool:
         "tllimit": "50"
     }
     try:
+        start_time = time.time()
         response = requests.get(REMY_API, params=params, headers=REMY_HEADERS)
+        elapsed_ms = (time.time() - start_time) * 1000
+        
+        if tracker:
+            tracker.track_request("GET", REMY_API, params, response.status_code, len(response.content), elapsed_ms)
+        
         data = response.json()
         pages = data.get("query", {}).get("pages", [])
         if pages and pages[0].get("templates"):
@@ -228,7 +336,7 @@ def check_page_has_gallery(title: str) -> bool:
     return False
 
 
-def get_image(query: str, image_type: str = "jacket") -> str:
+def get_image(query: str, image_type: str = "jacket", tracker: Optional[DebugTracker] = None) -> tuple[str, Optional[DebugTracker]]:
     """
     Gets an image (or a message about no image) from a RemyWiki song page.
 
@@ -238,15 +346,18 @@ def get_image(query: str, image_type: str = "jacket") -> str:
     :param query: a string representing something that's supposed to be a
         song name to find
     :param image_type: Either "jacket" or "banner", default "jacket"
-    :return: a response fitting for the bot to return, either the requested
-        image or a message describing what it found instead
+    :param tracker: Optional DebugTracker to record request timing
+    :return: tuple of (response message, tracker object)
     """
-    song_title = search_song(query)
+    if tracker is None and DEBUG_MODE:
+        tracker = DebugTracker()
+    
+    song_title = search_song(query, tracker)
     found_images = {}
     
     if song_title:
         # 1) Prefer images directly on the song page
-        images = get_images_from_page(song_title)
+        images = get_images_from_page(song_title, tracker)
         page_fallback = None
         for image_title, image_url in images.items():
             lower_title = image_title.lower()
@@ -258,15 +369,15 @@ def get_image(query: str, image_type: str = "jacket") -> str:
                 page_fallback = image_url
 
         if image_type in found_images:
-            return found_images[image_type]
+            return found_images[image_type], tracker
 
         if page_fallback:
             # Page has images, so prioritise these before gallery fallback
-            return page_fallback
+            return page_fallback, tracker
 
         # 2) fallback to gallery images when there are no direct page images
-        if check_page_has_gallery(song_title):
-            gallery_images = get_images_from_gallery(song_title)
+        if check_page_has_gallery(song_title, tracker):
+            gallery_images = get_images_from_gallery(song_title, tracker)
             gallery_fallback = None
             for image_title, image_url in gallery_images.items():
                 lower_title = image_title.lower()
@@ -277,17 +388,17 @@ def get_image(query: str, image_type: str = "jacket") -> str:
                 if not gallery_fallback:
                     gallery_fallback = image_url
             if image_type in found_images:
-                return found_images[image_type]
+                return found_images[image_type], tracker
             if gallery_fallback:
-                return gallery_fallback
+                return gallery_fallback, tracker
 
         # Otherwise report no available images
         if song_title.lower() == query.lower():
-            return f"{song_title} does not have any images"
+            return f"{song_title} does not have any images", tracker
         else:
-            return f"{query} seems to be the song {song_title} but it does not have any images"
+            return f"{query} seems to be the song {song_title} but it does not have any images", tracker
     else:  # No song page
-        return f"Could not find a song that looks like: {query}"
+        return f"Could not find a song that looks like: {query}", tracker
 
 
 class Remybot(commands.Cog):
@@ -305,8 +416,12 @@ class Remybot(commands.Cog):
         User Arguments:
             title: the name of a song to search for
         """
-        response = get_image(title, "jacket")
+        response, tracker = get_image(title, "jacket")
         await self.respond(ctx, response)
+        
+        if DEBUG_MODE and tracker and tracker.requests:
+            debug_output = f"```\n{tracker.format_debug_output()}\n```"
+            await self.respond(ctx, debug_output)
 
     @commands.hybrid_command()
     async def banner(self, ctx, *, title: str):
@@ -316,5 +431,9 @@ class Remybot(commands.Cog):
         User Arguments:
             title: the name of a song to search for
         """
-        response = get_image(title, "banner")
+        response, tracker = get_image(title, "banner")
         await self.respond(ctx, response)
+        
+        if DEBUG_MODE and tracker and tracker.requests:
+            debug_output = f"```\n{tracker.format_debug_output()}\n```"
+            await self.respond(ctx, debug_output)
